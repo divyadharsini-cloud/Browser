@@ -1,0 +1,92 @@
+---
+- name: Deploy automatic cache cleanup on boot
+  hosts: Batch4
+  become: true
+  gather_facts: false
+
+  vars:
+    skip_users:
+      - root
+      - nobody
+      - systemd-network
+      - _apt
+    cleanup_script_path: /usr/local/bin/clear_cache.sh
+    systemd_service_path: /etc/systemd/system/cache-clear-on-boot.service
+    log_file_path: /var/log/cache_cleanup.log
+
+  tasks:
+
+    - name: Get list of all user home directories
+      find:
+        paths: /home
+        file_type: directory
+        depth: 1
+      register: user_dirs
+
+    - name: Filter valid Linux users
+      set_fact:
+        valid_users: >-
+          {{
+            user_dirs.files
+            | map(attribute='path')
+            | map('basename')
+            | reject('in', skip_users)
+            | list
+          }}
+
+    - name: Create cache cleanup script
+      copy:
+        dest: "{{ cleanup_script_path }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Auto-clear browser caches for all non-system users
+          for user in $(ls /home); do
+            if [[ "{{ skip_users }}" != *"$user"* ]]; then
+              rm -rf /home/$user/.cache/mozilla/firefox/*.default-release/cache2/*
+            fi
+          done
+          echo "$(date): Cache cleared" >> "{{ log_file_path }}"
+
+    - name: Create systemd service file
+      copy:
+        dest: "{{ systemd_service_path }}"
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Clear cache after system boot
+          After=multi-user.target
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ cleanup_script_path }}
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      command: systemctl daemon-reload
+
+    - name: Enable cache-clear-on-boot service
+      systemd:
+        name: cache-clear-on-boot.service
+        enabled: true
+
+    - name: (Optional) Manually run cleanup once
+      command: "{{ cleanup_script_path }}"
+      register: cleanup_result
+      changed_when: false
+
+    - name: Show cleanup execution log
+      shell: tail -n 5 "{{ log_file_path }}"
+      register: cleanup_log
+      ignore_errors: yes
+
+    - name: Display result summary
+      debug:
+        msg:
+          - "✅ Cache cleanup script deployed at: {{ cleanup_script_path }}"
+          - "✅ Systemd service installed: {{ systemd_service_path }}"
+          - "✅ Service enabled to trigger on boot"
+          - "🧾 Last cleanup log entries:"
+          - "{{ cleanup_log.stdout_lines | default(['No logs yet']) }}"
